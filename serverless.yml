@@ -1,0 +1,54 @@
+service: fly-monitor
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.13
+  stage: main
+  region: us-east-1
+
+plugins:
+  - serverless-prune-plugin
+  - serverless-python-requirements
+
+package:
+  exclude:
+    - node_modules/**
+    - node_modules/.bin/**
+    - node_modules/.cache/**
+    - package.json
+    - package-lock.json
+
+functions:
+  fly-monitor:
+    memorySize: 256
+    handler: fly_monitor.main
+    events:
+      - schedule: rate(30 minutes)
+
+custom:
+  currentStage: ${opt:stage, self:provider.stage}
+  prune:
+    automatic: true
+    includeLayers: true
+    number: 5
+  pythonRequirements:
+    layer:
+      name: ${self:service}-${self:provider.stage}-dependencies
+      description: Python dependencies for ${self:service}
+      compatibleRuntimes:
+        - python3.13
+    dockerizePip: true
+    slim: true
+    strip: false
+    useStaticCache: true
+    noDeploy:
+      - boto3
+      - botocore
+      - docutils
+      - jmespath
+      - python-dateutil
+      - s3transfer
+      - six
+      - urllib3
