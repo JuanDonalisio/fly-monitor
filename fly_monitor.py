@@ -1,11 +1,13 @@
-import requests
-from bs4 import BeautifulSoup
 import os
-import smtplib
-from email.mime.text import MIMEText
-from dotenv import load_dotenv
+import time
+import requests
+from datetime import datetime
 from itertools import product
-
+from dotenv import load_dotenv
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
 
 # Cargar variables de entorno
 load_dotenv()
@@ -13,58 +15,46 @@ load_dotenv()
 # Configuración general
 ORIGENES = ["EZE", "SCL"]
 DESTINOS = [
-    "FRA", "MUC", "TXL", "BER",     # Alemania
-    "CDG", "ORY",                   # Francia
-    "ATH",                         # Grecia
-    "MAD", "BCN",                  # España
-    "FCO", "MXP", "VCE",           # Italia
-    "LIS", "OPO",                  # Portugal
-    "OSL"                          # Noruega
+    "FRA", "MUC", "TXL", "BER",  # Alemania
+    "CDG", "ORY",               # Francia
+    "ATH",                      # Grecia
+    "MAD", "BCN",               # España
+    "FCO", "MXP", "VCE",        # Italia
+    "LIS", "OPO",               # Portugal
+    "OSL"                       # Noruega
 ]
-
-FECHA = "2025-12-01"
-UMBRAL = 400
 
 # Clasificación de precios
 EXTREMADAMENTE_BARATO = 200
 MUY_BARATO = 300
+UMBRAL = 400
 
-# Credenciales Telegram
+# Fecha actual
+MES_ACTUAL = datetime.today().strftime("%Y-%m")
+
+# Env vars
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Credenciales Email
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
+def get_selenium_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920x1080")
 
-# Guardar alertas ya enviadas
-enviadas = set()
+    if "AWS_EXECUTION_ENV" in os.environ:
+        # AWS Lambda environment
+        options.binary_location = "/opt/headless-chromium"
+        service = Service("/opt/chromedriver")
+    else:
+        # Local environment
+        chromedriver_path = (".lib\chromedriver.exe")
+        service = Service(chromedriver_path)
 
-def enviar_telegram(mensaje):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
-    try:
-        r = requests.post(url, data=payload)
-        r.raise_for_status()
-        print("✅ Mensaje enviado por Telegram")
-    except Exception as e:
-        print(f"❌ Error al enviar Telegram: {e}")
-
-
-def enviar_email(mensaje):
-    msg = MIMEText(mensaje)
-    msg["Subject"] = "✈️ Alerta de vuelo barato"
-    msg["From"] = EMAIL_SENDER
-    msg["To"] = EMAIL_RECEIVER
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-            server.send_message(msg)
-        print("📧 Email enviado correctamente")
-    except Exception as e:
-        print(f"❌ Error al enviar Email: {e}")
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
 
 
 def clasificar_precio(precio):
@@ -76,48 +66,63 @@ def clasificar_precio(precio):
         return "💰 *Barato*"
 
 
-def buscar_vuelo(origen, destino):
-    url = f"https://www.flylevel.com/es/vuelos?origin={origen}&destination={destino}&departureDate={FECHA}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    print(f"🔍 Revisando {origen} -> {destino} para {FECHA}")
-
+def enviar_telegram(mensaje):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": mensaje}
     try:
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
+        r = requests.post(url, data=payload)
+        r.raise_for_status()
+        print("✅ Mensaje enviado por Telegram")
     except Exception as e:
-        print(f"❌ Error al consultar {origen}->{destino}: {e}")
-        return
+        print(f"❌ Error al enviar Telegram: {e}")
 
-    soup = BeautifulSoup(response.text, "html.parser")
+def buscar_vuelo(origen, destino):
+    url = f"https://www.flylevel.com/Flight/Select?culture=es-ES&triptype=OW&o1={origen}&d1={destino}&dd1={MES_ACTUAL}&ADT=1&CHD=0&INL=0&r=false&mm=true&forcedCurrency=EUR&forcedCulture=es-ES&newecom=true&currency=USD"
+    print(f"🔍 Revisando {origen} -> {destino}")
+    
+    driver = None
+    try:
+        driver = get_selenium_driver()
+        driver.get(url)
+        time.sleep(5)
+        print(driver)
+        # Buscar todas las fechas con precios
+        dias = driver.find_elements(By.CLASS_NAME, "cal-day")
 
-    precios = soup.find_all(string=lambda text: text and "€" in text)
+        for dia in dias:
+            try:
+                num_dia = dia.find_element(By.CLASS_NAME, "cal-day-num").text
+                precio_str = dia.find_element(By.CLASS_NAME, "cal-day-price").text
 
-    for precio_str in precios:
-        try:
-            precio = int(precio_str.replace("€", "").replace(".", "").strip())
+                # Limpieza del texto
+                precio = int(precio_str.replace(".", "").replace(",", "").replace("€", "").strip())
+                fecha_completa = f"{MES_ACTUAL}-{int(num_dia):02d}"
 
-            # Para evitar repetir alertas
-            key = f"{origen}-{destino}-{precio}"
-            if key in enviadas:
-                continue
-            if precio < UMBRAL:
-                tipo = clasificar_precio(precio)
-                mensaje = (
-                    f"{tipo}\n\n"
-                    f"🛫 Ruta: {origen} → {destino}\n"
-                    f"📅 Fecha: {FECHA}\n"
-                    f"💶 Precio: {precio}€\n"
-                    f"🔗 Link: {url}"
-                )
-                enviar_telegram(mensaje)
-                enviar_email(mensaje)
-                enviadas.add(key)
-        except ValueError:
-            continue
+                if precio < UMBRAL:
+                    tipo = clasificar_precio(precio)
+                    mensaje = (
+                        f"{tipo}\n\n"
+                        f"🛫 Ruta: {origen} → {destino}\n"
+                        f"📅 Fecha: {fecha_completa}\n"
+                        f"💶 Precio: {precio}€\n"
+                        f"🔗 Link: {url}"
+                    )
+                    enviar_telegram(mensaje)
+            except Exception as e:
+                print(f"❌ Error al parsear día: {e}")
+
+    except Exception as e:
+        print(f"❌ Error con Selenium: {e}")
+    finally:
+        if driver:
+            driver.quit()
 
 
 def main(event, context):
     print("🚀 Monitor de vuelos iniciado...")
     for origen, destino in product(ORIGENES, DESTINOS):
         buscar_vuelo(origen, destino)
+
+
+if __name__ == "__main__":
+    main(None, None)
